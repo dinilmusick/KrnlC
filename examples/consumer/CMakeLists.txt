@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(KrnlCExternalConsumer C)
+find_package(KrnlC 0.2 CONFIG REQUIRED)
+add_executable(krnlc_consumer main.c)
+target_link_libraries(krnlc_consumer PRIVATE KrnlC::krnlc)
+set_target_properties(krnlc_consumer PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
