@@ -93,8 +93,54 @@ static krnlc_result transport(void *p,const char *s,const char *o,const krnlc_re
  if(out->capacity<1)return KRNLC_E_CAPACITY;
  out->values[0]=in->values[0];out->values[0].name="result";out->count=1;return KRNLC_SUCCESS;
 }
+
+static void test_null_schema_and_bounds(void) {
+ assert(KRNLC_ABI_VERSION==2u);
+ krnlc_value values[2]={{.name="a",.type=KRNLC_I64,.as.integer=4},
+                        {.name="a",.type=KRNLC_I64,.as.integer=5}};
+ krnlc_record record={values,1,2};
+ assert(krnlc_validate(NULL,&record)==KRNLC_SUCCESS);
+ record.count=2;assert(krnlc_validate(NULL,&record)==KRNLC_E_SCHEMA);
+ record.count=1;values[0].type=(krnlc_type)999;
+ assert(krnlc_validate(NULL,&record)==KRNLC_E_SCHEMA);
+ values[0].type=KRNLC_BYTES;values[0].as.blob.length=1;values[0].as.blob.data=NULL;
+ assert(krnlc_validate(NULL,&record)==KRNLC_E_SCHEMA);
+ const krnlc_field bad[2]={{"a",KRNLC_I64,true,0},{NULL,KRNLC_I64,false,0}};
+ krnlc_schema schema={bad,2,true};
+ values[0].type=KRNLC_I64;assert(krnlc_validate(&schema,&record)==KRNLC_E_ARGUMENT);
+ krnlc_runtime runtime;krnlc_service service;
+ assert(krnlc_runtime_init(&runtime,&service,SIZE_MAX/sizeof(service)+1,NULL)==KRNLC_E_ARGUMENT);
+ krnlc_bus bus;krnlc_subscription sub;
+ assert(krnlc_bus_init(&bus,&sub,SIZE_MAX/sizeof(sub)+1,1)==KRNLC_E_ARGUMENT);
+ krnlc_queue queue;krnlc_job job;
+ assert(krnlc_queue_init(&queue,&runtime,&job,SIZE_MAX/sizeof(job)+1)==KRNLC_E_ARGUMENT);
+}
+static void test_dependency_lifetime(void) {
+ krnlc_runtime r;krnlc_service slots[2];fixture f={0};
+ krnlc_descriptor base={.name="base",.state=&f,.cleanup=cleaned};
+ const char *const required[]={"base"};
+ krnlc_descriptor client={.name="client",.dependencies=required,.dependency_count=1};
+ assert(krnlc_runtime_init(&r,slots,2,NULL)==KRNLC_SUCCESS);
+ krnlc_service *a,*b;
+ assert(krnlc_register(&r,&base,&a)==KRNLC_SUCCESS);
+ assert(krnlc_register(&r,&client,&b)==KRNLC_SUCCESS);
+ assert(krnlc_start(b)==KRNLC_E_STATE);
+ assert(krnlc_start(a)==KRNLC_SUCCESS);
+ assert(krnlc_start(b)==KRNLC_SUCCESS);
+ assert(krnlc_stop(a)==KRNLC_E_STATE);
+ assert(krnlc_dispose(a)==KRNLC_E_STATE);
+ assert(krnlc_stop(b)==KRNLC_SUCCESS);
+ assert(krnlc_stop(a)==KRNLC_SUCCESS);
+ assert(krnlc_dispose(a)==KRNLC_E_STATE);
+ assert(krnlc_start(b)==KRNLC_E_STATE);
+ assert(krnlc_start(a)==KRNLC_SUCCESS);
+ assert(krnlc_start(b)==KRNLC_SUCCESS);
+ assert(krnlc_runtime_dispose(&r)==KRNLC_SUCCESS);
+ assert(f.cleanup==1 && a->disposed && b->disposed);
+ assert(krnlc_runtime_dispose(&r)==KRNLC_SUCCESS);
+}
 int main(void) {
- test_schema();test_events();
+ test_schema();test_events();test_null_schema_and_bounds();test_dependency_lifetime();
  fixture f={0};krnlc_host host={&f,now,trace,wake};krnlc_runtime runtime;krnlc_service storage[2];
  assert(krnlc_runtime_init(&runtime,storage,2,&host)==KRNLC_SUCCESS);
  krnlc_descriptor calc={"calc",ops,6,caps,2,NULL,0,&f,cleaned};
@@ -109,6 +155,7 @@ int main(void) {
  krnlc_bus service_bus;krnlc_subscription service_events[1];
  assert(krnlc_bus_init(&service_bus,service_events,1,1)==KRNLC_SUCCESS);
  assert(krnlc_service_attach_bus(s,&service_bus)==KRNLC_SUCCESS);
+ assert(krnlc_service_attach_bus(&storage[1],&service_bus)==KRNLC_E_EXISTS);
  assert(krnlc_register(&runtime,&(krnlc_descriptor){.name="third"},NULL)==KRNLC_E_CAPACITY);
  krnlc_value iv[]={{.name="number",.type=KRNLC_I64,.as.integer=42}};
  krnlc_value ov[1];krnlc_record in={iv,1,1};krnlc_record out={ov,0,1};
@@ -136,8 +183,10 @@ int main(void) {
  assert(f.wakes==1);
  assert(krnlc_enqueue(&q,&j,&b)==KRNLC_SUCCESS);
  assert(krnlc_enqueue(&q,&j,NULL)==KRNLC_E_CAPACITY);
+ assert(krnlc_last_error(&runtime)->code==KRNLC_E_CAPACITY);
  assert(krnlc_cancel(&q,a)==KRNLC_SUCCESS);
  assert(krnlc_pump(&q,&executed,&done)==KRNLC_SUCCESS && executed==a && done==KRNLC_E_CANCELLED);
+ assert(krnlc_last_error(&runtime)->code==KRNLC_E_CANCELLED);
  assert(krnlc_pump(&q,&executed,&done)==KRNLC_SUCCESS && executed==b && done==KRNLC_SUCCESS);
  assert(krnlc_pump(&q,NULL,NULL)==KRNLC_E_NOT_FOUND);
  j.deadline_ms=19;assert(krnlc_enqueue(&q,&j,&a)==KRNLC_SUCCESS);
@@ -160,6 +209,8 @@ int main(void) {
  assert(krnlc_stop(s)==KRNLC_SUCCESS);
  assert(krnlc_stop(s)==KRNLC_SUCCESS);
  assert(krnlc_start(s)==KRNLC_SUCCESS);
+ assert(krnlc_dispose(s)==KRNLC_E_STATE); /* dependent must be disposed first */
+ assert(krnlc_dispose(&storage[1])==KRNLC_SUCCESS);
  assert(krnlc_dispose(s)==KRNLC_SUCCESS);
  assert(krnlc_dispose(s)==KRNLC_SUCCESS && f.cleanup==1);
  assert(krnlc_start(s)==KRNLC_E_DISPOSED);
