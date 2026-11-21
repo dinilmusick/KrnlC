@@ -25,3 +25,18 @@ mutation, flow cycle detection, restart/terminal disposal and external installed
 consumer compilation. GCC and Clang strict builds plus ASan/UBSan are expected
 on supported hosts. Embedded targets and actual transports remain integration
 responsibilities of embedding applications.
+
+## Final hardening invariants
+
+- A dependent service cannot start until all named dependencies are **running**.
+  A dependency cannot stop while dependents are running, or be disposed while
+  any dependents remain registered and undisposed. `runtime_dispose` cleans up
+  in reverse registry order (dependencies are registered before dependents).
+  These are lifecycle guards, not cross-service orchestration.
+- With `schema == NULL`, record *shape* remains validated: fields need valid
+  names, unique keys, valid primitive tags, and non-null non-empty blobs.
+  There is no type-specific schema enforcement when schema is absent.
+- Caller-supplied array capacities that overflow `SIZE_MAX / sizeof(element)`
+  fail before a bulk initialization, avoiding unsigned wraparound writes.
+- Each event bus can be attached to at most one service, preventing accidental
+  disposal of another service's subscriptions.

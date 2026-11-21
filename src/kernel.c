@@ -23,7 +23,16 @@ const char *krnlc_result_string(krnlc_result c) {
 }
 krnlc_result krnlc_validate(const krnlc_schema *schema,const krnlc_record *record) {
  if (!record || (record->count && !record->values) || record->count>record->capacity) return KRNLC_E_ARGUMENT;
- if (!schema) return KRNLC_SUCCESS;
+ /* A NULL schema accepts arbitrary field names, not malformed record values. */
+ if (!schema) {
+  for(size_t i=0;i<record->count;i++) {
+   const krnlc_value *v=&record->values[i];
+   if(!word(v->name)||!typename_valid(v->type))return KRNLC_E_SCHEMA;
+   if((v->type==KRNLC_TEXT||v->type==KRNLC_BYTES)&&v->as.blob.length&&!v->as.blob.data)return KRNLC_E_SCHEMA;
+   for(size_t j=0;j<i;j++)if(strcmp(v->name,record->values[j].name)==0)return KRNLC_E_SCHEMA;
+  }
+  return KRNLC_SUCCESS;
+ }
  if (schema->count && !schema->fields) return KRNLC_E_ARGUMENT;
  for(size_t i=0;i<schema->count;i++) {
   const krnlc_field *field=&schema->fields[i]; bool found=false;
@@ -50,7 +59,7 @@ krnlc_result krnlc_validate(const krnlc_schema *schema,const krnlc_record *recor
  return KRNLC_SUCCESS;
 }
 krnlc_result krnlc_runtime_init(krnlc_runtime *r,krnlc_service *memory,size_t capacity,const krnlc_host *host) {
- if (!r || (capacity && !memory)) return KRNLC_E_ARGUMENT;
+ if (!r || (capacity && !memory) || capacity>SIZE_MAX/sizeof(*memory)) return KRNLC_E_ARGUMENT;
  memset(r,0,sizeof(*r));r->services=memory;r->capacity=capacity;if(host) r->host=*host;
  if (capacity) memset(memory,0,capacity*sizeof(*memory));
  return KRNLC_SUCCESS;
@@ -81,13 +90,36 @@ krnlc_result krnlc_register(krnlc_runtime *r,const krnlc_descriptor *d,krnlc_ser
  }
  for(size_t i=0;i<d->capability_count;i++) if(!word(d->capabilities[i])) return KRNLC_E_ARGUMENT;
  for(size_t i=0;i<d->dependency_count;i++) if(!word(d->dependencies[i])||!krnlc_find(r,d->dependencies[i])) return KRNLC_E_NOT_FOUND;
- krnlc_service *s=&r->services[r->count];memset(s,0,sizeof(*s));s->descriptor=d;
+ krnlc_service *s=&r->services[r->count];memset(s,0,sizeof(*s));s->owner=r;s->descriptor=d;
  if (krnlc_lifecycle_init(&s->lifecycle)!=KRNLC_OK) return KRNLC_E_STATE;
  r->count++;if(out)*out=s;return KRNLC_SUCCESS;
+}
+/* Dependency names resolve within the same runtime.  No cross-service execution
+   or scheduling is performed by this check. */
+static bool dependencies_ready(const krnlc_service *s) {
+ if(!s->owner)return false;
+ for(size_t i=0;i<s->descriptor->dependency_count;i++) {
+  const krnlc_service *dependency=krnlc_find(s->owner,s->descriptor->dependencies[i]);
+  if(!dependency||dependency->disposed||dependency->lifecycle.state!=KRNLC_RUNNING)return false;
+ }
+ return true;
+}
+static bool live_dependents(const krnlc_service *s,bool running_only) {
+ if(!s->owner)return false;
+ for(size_t i=0;i<s->owner->count;i++) {
+  const krnlc_service *candidate=&s->owner->services[i];
+  if(candidate==s||candidate->disposed||!candidate->descriptor)continue;
+  if(running_only&&candidate->lifecycle.state!=KRNLC_RUNNING)continue;
+  for(size_t j=0;j<candidate->descriptor->dependency_count;j++) {
+   if(strcmp(candidate->descriptor->dependencies[j],s->descriptor->name)==0)return true;
+  }
+ }
+ return false;
 }
 krnlc_result krnlc_start(krnlc_service *s) {
  if(!s||!s->descriptor) return KRNLC_E_ARGUMENT;
  if(s->disposed) return KRNLC_E_DISPOSED;
+ if(!s->owner||!dependencies_ready(s))return KRNLC_E_STATE;
  if(s->lifecycle.state==KRNLC_RUNNING) return KRNLC_SUCCESS;
  if(s->lifecycle.state==KRNLC_UNINITIALIZED) {
   if(krnlc_lifecycle_transition(&s->lifecycle,KRNLC_INITIALIZING)!=KRNLC_OK ||
@@ -104,7 +136,7 @@ krnlc_result krnlc_stop(krnlc_service *s) {
  if(!s||!s->descriptor) return KRNLC_E_ARGUMENT;
  if(s->disposed)return KRNLC_E_DISPOSED;
  if(s->lifecycle.state==KRNLC_STOPPED)return KRNLC_SUCCESS;
- if(s->busy||s->lifecycle.state!=KRNLC_RUNNING)return KRNLC_E_STATE;
+ if(s->busy||s->lifecycle.state!=KRNLC_RUNNING||live_dependents(s,true))return KRNLC_E_STATE;
  if(krnlc_lifecycle_transition(&s->lifecycle,KRNLC_STOPPING)!=KRNLC_OK ||
     krnlc_lifecycle_transition(&s->lifecycle,KRNLC_STOPPED)!=KRNLC_OK)return KRNLC_E_STATE;
  return KRNLC_SUCCESS;
@@ -112,7 +144,7 @@ krnlc_result krnlc_stop(krnlc_service *s) {
 krnlc_result krnlc_dispose(krnlc_service *s) {
  if(!s||!s->descriptor)return KRNLC_E_ARGUMENT;
  if(s->disposed)return KRNLC_SUCCESS;
- if(s->busy)return KRNLC_E_STATE;
+ if(s->busy||live_dependents(s,false))return KRNLC_E_STATE;
  s->disposed=true;
  if(s->events)krnlc_bus_dispose(s->events);
  if(s->descriptor->cleanup)s->descriptor->cleanup(s->descriptor->state);
@@ -121,8 +153,8 @@ krnlc_result krnlc_dispose(krnlc_service *s) {
 krnlc_result krnlc_runtime_dispose(krnlc_runtime *r) {
  if(!r)return KRNLC_E_ARGUMENT;
  for(size_t i=0;i<r->count;i++)if(r->services[i].busy)return KRNLC_E_STATE;
- for(size_t i=0;i<r->count;i++) {
-  krnlc_result rc=krnlc_dispose(&r->services[i]);if(rc!=KRNLC_SUCCESS)return rc;
+ for(size_t i=r->count;i>0;i--) {
+  krnlc_result rc=krnlc_dispose(&r->services[i-1]);if(rc!=KRNLC_SUCCESS)return rc;
  }
  r->count=0;return KRNLC_SUCCESS;
 }
@@ -135,6 +167,7 @@ krnlc_result krnlc_invoke(krnlc_runtime *r,const char *name,const char *opname,c
  if(!s)return report(r,KRNLC_E_NOT_FOUND,name,opname,"service not registered");
  if(s->disposed)return report(r,KRNLC_E_DISPOSED,name,opname,"service disposed");
  if(s->lifecycle.state!=KRNLC_RUNNING)return report(r,KRNLC_E_STATE,name,opname,"service not running");
+ if(!dependencies_ready(s))return report(r,KRNLC_E_STATE,name,opname,"dependency not running");
  if(s->busy)return report(r,KRNLC_E_REENTRANT,name,opname,"same service recursion rejected");
  const krnlc_operation *op=operation_find(s->descriptor,opname);
  if(!op)return report(r,KRNLC_E_NOT_FOUND,name,opname,"operation not found");
@@ -154,12 +187,12 @@ krnlc_result krnlc_invoke(krnlc_runtime *r,const char *name,const char *opname,c
  return KRNLC_SUCCESS;
 }
 krnlc_result krnlc_queue_init(krnlc_queue *q,krnlc_runtime *r,krnlc_job *memory,size_t capacity) {
- if(!q||!r||(capacity&&!memory))return KRNLC_E_ARGUMENT;
+ if(!q||!r||(capacity&&!memory)||capacity>SIZE_MAX/sizeof(*memory))return KRNLC_E_ARGUMENT;
  memset(q,0,sizeof(*q));q->runtime=r;q->items=memory;q->capacity=capacity;return KRNLC_SUCCESS;
 }
 krnlc_result krnlc_enqueue(krnlc_queue *q,const krnlc_job *job,uint64_t *id) {
  if(!q||!q->runtime||!job||!word(job->service)||!word(job->operation)||!job->input||!job->output)return KRNLC_E_ARGUMENT;
- if(q->count==q->capacity){q->runtime->metrics.queue_full++;return KRNLC_E_CAPACITY;}
+ if(q->count==q->capacity){q->runtime->metrics.queue_full++;return report(q->runtime,KRNLC_E_CAPACITY,job->service,job->operation,"execution queue is full");}
  if(job->deadline_ms&&!q->runtime->host.now_ms)return KRNLC_E_UNSUPPORTED;
  krnlc_job next=*job;next.id=++q->next_id;if(!next.id)next.id=++q->next_id;
  next.result=KRNLC_SUCCESS;q->items[q->count++]=next;
@@ -178,12 +211,12 @@ krnlc_result krnlc_pump(krnlc_queue *q,uint64_t *id,krnlc_result *result) {
  krnlc_job job=q->items[0];q->count--;
  if(q->count)memmove(q->items,q->items+1,q->count*sizeof(*q->items));
  if(id)*id=job.id;
- krnlc_result rc=job.cancelled ? KRNLC_E_CANCELLED : krnlc_invoke(q->runtime,job.service,job.operation,job.input,job.output,job.deadline_ms,&job.cancelled);
+ krnlc_result rc=job.cancelled ? report(q->runtime,KRNLC_E_CANCELLED,job.service,job.operation,"queued job cancelled") : krnlc_invoke(q->runtime,job.service,job.operation,job.input,job.output,job.deadline_ms,&job.cancelled);
  if(result)*result=rc;
  return KRNLC_SUCCESS;
 }
 krnlc_result krnlc_bus_init(krnlc_bus *bus,krnlc_subscription *memory,size_t capacity,unsigned max_depth) {
- if(!bus||(capacity&&!memory)||!max_depth)return KRNLC_E_ARGUMENT;
+ if(!bus||(capacity&&!memory)||!max_depth||capacity>SIZE_MAX/sizeof(*memory))return KRNLC_E_ARGUMENT;
  memset(bus,0,sizeof(*bus));bus->items=memory;bus->capacity=capacity;bus->max_depth=max_depth;
  if(capacity)memset(memory,0,sizeof(*memory)*capacity);
  return KRNLC_SUCCESS;
@@ -228,7 +261,8 @@ krnlc_result krnlc_service_attach_bus(krnlc_service *s,krnlc_bus *bus) {
  if(!s||!s->descriptor||!bus)return KRNLC_E_ARGUMENT;
  if(s->disposed||bus->disposed)return KRNLC_E_DISPOSED;
  if(s->lifecycle.state!=KRNLC_UNINITIALIZED)return KRNLC_E_STATE;
- s->events=bus;return KRNLC_SUCCESS;
+ if((bus->owner&&bus->owner!=s)||(s->events&&s->events!=bus))return KRNLC_E_EXISTS;
+ bus->owner=s;s->events=bus;return KRNLC_SUCCESS;
 }
 krnlc_result krnlc_service_emit(krnlc_service *s,const char *event,const krnlc_record *payload) {
  if(!s||!s->descriptor)return KRNLC_E_ARGUMENT;

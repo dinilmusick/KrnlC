@@ -7,7 +7,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define KRNLC_ABI_VERSION 1u
+#define KRNLC_ABI_VERSION 2u
 #define KRNLC_MAX_FLOW_NODES 64u
 
 typedef enum krnlc_result {
@@ -24,6 +24,8 @@ typedef struct krnlc_record {krnlc_value *values;size_t count;size_t capacity;} 
 typedef struct krnlc_field {const char *name;krnlc_type type;bool required;size_t max_bytes;} krnlc_field;
 typedef struct krnlc_schema {const krnlc_field *fields;size_t count;bool reject_unknown;} krnlc_schema;
 struct krnlc_context;
+struct krnlc_runtime;
+struct krnlc_service;
 typedef krnlc_result (*krnlc_handler)(struct krnlc_context *,const krnlc_record *,krnlc_record *);
 typedef struct krnlc_operation {const char *name;const krnlc_schema *input;const krnlc_schema *output;krnlc_handler run;} krnlc_operation;
 typedef void (*krnlc_cleanup)(void *state);
@@ -38,7 +40,7 @@ typedef void (*krnlc_trace)(void *user,const krnlc_error *error);
 typedef void (*krnlc_schedule)(void *user);
 typedef struct krnlc_host {void *user;krnlc_clock now_ms;krnlc_trace trace;krnlc_schedule wake;} krnlc_host;
 struct krnlc_bus;
-typedef struct krnlc_service {const krnlc_descriptor *descriptor;krnlc_lifecycle lifecycle;struct krnlc_bus *events;bool disposed;bool busy;} krnlc_service;
+typedef struct krnlc_service {struct krnlc_runtime *owner;const krnlc_descriptor *descriptor;krnlc_lifecycle lifecycle;struct krnlc_bus *events;bool disposed;bool busy;} krnlc_service;
 typedef struct krnlc_metrics {uint64_t calls;uint64_t errors;uint64_t queue_full;} krnlc_metrics;
 typedef struct krnlc_runtime {krnlc_service *services;size_t capacity;size_t count;krnlc_host host;krnlc_error last_error;krnlc_metrics metrics;} krnlc_runtime;
 typedef struct krnlc_context {krnlc_runtime *runtime;krnlc_service *service;void *state;uint64_t deadline_ms;bool *cancelled;} krnlc_context;
@@ -65,7 +67,7 @@ krnlc_result krnlc_pump(krnlc_queue *queue,uint64_t *id,krnlc_result *result);
 /* Mutable subscriptions may be added/removed inside callbacks; nesting is explicitly bounded. */
 typedef void (*krnlc_event_fn)(void *user,const char *event,const krnlc_record *payload);
 typedef struct krnlc_subscription {uint64_t id;const char *event;krnlc_event_fn callback;void *user;bool active;} krnlc_subscription;
-typedef struct krnlc_bus {krnlc_subscription *items;size_t capacity;uint64_t next_id;unsigned depth;unsigned max_depth;bool disposed;} krnlc_bus;
+typedef struct krnlc_bus {struct krnlc_service *owner;krnlc_subscription *items;size_t capacity;uint64_t next_id;unsigned depth;unsigned max_depth;bool disposed;} krnlc_bus;
 krnlc_result krnlc_bus_init(krnlc_bus *bus,krnlc_subscription *memory,size_t capacity,unsigned max_depth);
 krnlc_result krnlc_subscribe(krnlc_bus *bus,const char *event,krnlc_event_fn callback,void *user,uint64_t *id);
 krnlc_result krnlc_unsubscribe(krnlc_bus *bus,uint64_t id);
