@@ -1,0 +1,39 @@
+name: Verified native source release
+on:
+  workflow_run:
+    workflows: ["KrnlC C11 portable kernel"]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  release:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact CI-certified main head
+        env:
+          VERIFIED_HEAD: ${{ github.event.workflow_run.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$VERIFIED_HEAD"
+      - name: Verify CMake source package
+        run: |
+          set -euo pipefail
+          cmake -S . -B "${RUNNER_TEMP}/native-release" -DBUILD_TESTING=OFF
+          cmake --build "${RUNNER_TEMP}/native-release" --parallel 2
+          cmake --install "${RUNNER_TEMP}/native-release" --prefix "${RUNNER_TEMP}/native-install"
+      - name: Prepare version PR or publish tagged source release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
-project(KrnlC VERSION 0.3.0 LANGUAGES C)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" ULTRST_RELEASE_VERSION LIMIT_COUNT 1)
+project(KrnlC VERSION ${ULTRST_RELEASE_VERSION} LANGUAGES C)
 # Exact upstream compatibility pin. The freestanding C11 core does not consume GutC APIs.
 set(KRNLC_GUTC_REFERENCE_SHA "0e26ac721c7a020078cfaf52e6fce259fe03301e" CACHE STRING "Reviewed GutC interface revision")
 set(KRNLC_GUTC_SOURCE_DIR "" CACHE PATH "Optional pinned GutC checkout to verify; no GutC APIs currently consumed")
